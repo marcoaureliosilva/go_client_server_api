@@ -10,17 +10,16 @@ import (
 	"time"
 )
 
-const (
-	serverUrl      = "http://server:8080/cotacao"
-	clientTimeout  = 300 * time.Millisecond
-	outputFilePath = "/app/cotacao.txt"
-)
+type ExchangeRate struct {
+	Bid string `json:"bid"`
+}
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), clientTimeout)
+	// Criar um contexto com timeout de 300ms para a requisição HTTP
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", serverUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:8080/cotacao", nil)
 	if err != nil {
 		log.Fatalf("Failed to create request: %v", err)
 	}
@@ -28,26 +27,23 @@ func main() {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to get response: %v", err)
+		log.Fatalf("Failed to perform request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	var data map[string]interface{}
-	err = json.NewDecoder(resp.Body).Decode(&data)
-	if err != nil {
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("Server returned non-200 status: %v", resp.Status)
+	}
+
+	var rate ExchangeRate
+	if err := json.NewDecoder(resp.Body).Decode(&rate); err != nil {
 		log.Fatalf("Failed to decode response: %v", err)
 	}
 
-	bid, ok := data["bid"].(string)
-	if !ok {
-		log.Fatalf("Failed to get bid value from response")
-	}
-
-	content := fmt.Sprintf("Dólar: %s", bid)
-	err = ioutil.WriteFile(outputFilePath, []byte(content), 0644)
-	if err != nil {
+	content := fmt.Sprintf("Dólar: %s", rate.Bid)
+	if err := ioutil.WriteFile("cotacao.txt", []byte(content), 0644); err != nil {
 		log.Fatalf("Failed to write to file: %v", err)
 	}
 
-	fmt.Println("Cotação armazenada com sucesso:", content)
+	fmt.Println("Cotação salva em 'cotacao.txt'")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -11,103 +12,90 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-const (
-	apiUrl        = "https://economia.awesomeapi.com.br/json/last/USD-BRL"
-	dbTimeout     = 10 * time.Second
-	apiTimeout    = 200 * time.Second
-	serverAddress = ":8080"
-)
-
-type Cotacao struct {
-	Code string `json:"code"`
-	Bid  string `json:"bid"`
+type ExchangeRate struct {
+	Bid string `json:"bid"`
 }
 
-type ApiResponse struct {
-	USD_BRL Cotacao `json:"USDBRL"`
-}
-
-func fetchCotacao(ctx context.Context) (Cotacao, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", apiUrl, nil)
+func getDollarRate(ctx context.Context) (ExchangeRate, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://economia.awesomeapi.com.br/json/last/USD-BRL", nil)
 	if err != nil {
-		return Cotacao{}, err
+		return ExchangeRate{}, err
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return Cotacao{}, err
+		return ExchangeRate{}, err
 	}
 	defer resp.Body.Close()
 
-	var apiResp ApiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return Cotacao{}, err
+	var result map[string]ExchangeRate
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ExchangeRate{}, err
 	}
 
-	return apiResp.USD_BRL, nil
+	return result["USDBRL"], nil
 }
 
-func saveToDB(ctx context.Context, db *sql.DB, cotacao Cotacao) error {
-	query := "INSERT INTO cotacoes (code, bid) VALUES (?, ?)"
-	stmt, err := db.PrepareContext(ctx, query)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	_, err = stmt.ExecContext(ctx, cotacao.Code, cotacao.Bid)
+func saveRateToDB(ctx context.Context, db *sql.DB, rate ExchangeRate) error {
+	query := "INSERT INTO rates (bid, created_at) VALUES (?, ?)"
+	_, err := db.ExecContext(ctx, query, rate.Bid, time.Now())
 	return err
 }
 
-func cotacaoHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), apiTimeout)
+func handler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Timeout para pegar a cotação
+	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 
-	cotacao, err := fetchCotacao(ctx)
+	rate, err := getDollarRate(ctx)
 	if err != nil {
-		http.Error(w, "Failed to fetch cotacao", http.StatusInternalServerError)
-		log.Printf("Failed to fetch cotacao: %v", err)
+		http.Error(w, "Error getting dollar rate", http.StatusInternalServerError)
+		log.Println("Error getting dollar rate:", err)
 		return
 	}
 
-	db, err := sql.Open("sqlite3", "./cotacoes.db")
+	db, err := sql.Open("sqlite3", "./data.db")
 	if err != nil {
-		http.Error(w, "Failed to connect to database", http.StatusInternalServerError)
-		log.Printf("Failed to connect to database: %v", err)
+		http.Error(w, "Error opening database", http.StatusInternalServerError)
+		log.Println("Error opening database:", err)
 		return
 	}
 	defer db.Close()
 
-	dbCtx, dbCancel := context.WithTimeout(r.Context(), dbTimeout)
+	// Timeout para salvar cotação no banco
+	dbCtx, dbCancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer dbCancel()
 
-	if err := saveToDB(dbCtx, db, cotacao); err != nil {
-		http.Error(w, "Failed to save cotacao", http.StatusInternalServerError)
-		log.Printf("Failed to save cotacao: %v", err)
+	if err := saveRateToDB(dbCtx, db, rate); err != nil {
+		http.Error(w, "Error saving to database", http.StatusInternalServerError)
+		log.Println("Error saving to database:", err)
 		return
 	}
 
-	json.NewEncoder(w).Encode(cotacao)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(rate)
 }
 
 func main() {
-	db, err := sql.Open("sqlite3", "./cotacoes.db")
+	db, err := sql.Open("sqlite3", "./data.db")
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		log.Fatal(err)
 	}
 	defer db.Close()
 
-	createTableQuery := `CREATE TABLE IF NOT EXISTS cotacoes (
+	query := `CREATE TABLE IF NOT EXISTS rates (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		code TEXT,
-		bid TEXT
+		bid TEXT,
+		created_at DATETIME
 	)`
-	_, err = db.Exec(createTableQuery)
-	if err != nil {
-		log.Fatalf("Failed to create table: %v", err)
+	if _, err := db.Exec(query); err != nil {
+		log.Fatal(err)
 	}
 
-	http.HandleFunc("/cotacao", cotacaoHandler)
-	log.Fatal(http.ListenAndServe(serverAddress, nil))
+	http.HandleFunc("/cotacao", handler)
+	fmt.Println("Server is running on port 8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
